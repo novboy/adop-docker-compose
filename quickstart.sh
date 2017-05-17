@@ -24,7 +24,7 @@ Usage:
 	    -t aws 
 	    -m <MACHINE_NAME> 
 	    -c <AWS_VPC_ID> 
-	    [-r <AWS_DEFAULT_REGION>] 
+	    -r <AWS_DEFAULT_REGION> 
 	    [-z <AVAILABILITY_ZONE_LETTER>] 
 	    [-a <AWS_ACCESS_KEY>] 
 	    [-s <AWS_SECRET_ACCESS_KEY>] 
@@ -100,7 +100,9 @@ source_aws() {
 
 provision_aws() {
     if [ -z ${MACHINE_NAME} ] | \
-       [ -z ${AWS_VPC_ID} ]; then
+       [ -z ${AWS_VPC_ID} ] | \
+       [ -z ${AWS_DEFAULT_REGION} ]; then
+        echo "ERROR: Mandatory parameters missing!"
         usage
         exit 1
     fi
@@ -113,18 +115,14 @@ provision_aws() {
             exit 1
     fi
 
-    if [ -z ${AWS_ACCESS_KEY_ID} ] & \
-        [ -f ~/.aws/credentials ];
+    if [ -z ${AWS_ACCESS_KEY_ID} ];
     then
-      echo "Using default AWS credentials from ~/.aws/credentials"
-      eval $(grep -v '^\[' ~/.aws/credentials | sed 's/^\(.*\)\s=\s/export \U\1=/')
+      echo "WARN: AWS_ACCESS_KEY_ID not set (externally or with -a), delegating to Docker Machine"
     fi
 
-    if [ -z ${AWS_DEFAULT_REGION} ] & \
-        [ -f ~/.aws/config ];
+    if [ -z ${AWS_SECRET_ACCESS_KEY} ];
     then
-      echo "Using default AWS region from ~/.aws/config"
-      eval $(grep -v '^\[' ~/.aws/config | sed 's/^\(region\)\s\?=\s\?/export AWS_DEFAULT_REGION=/')
+      echo "WARN: AWS_SECRET_ACCESS_KEY not set (externally or with -s), delegating to Docker Machine"
     fi
     
     if [ -z ${AWS_DOCKER_MACHINE_SIZE} ]; then
@@ -139,31 +137,31 @@ provision_aws() {
 
     # Create Docker machine if one doesn't already exist with the same name
     docker-machine ip ${MACHINE_NAME} > /dev/null 2>&1
-    if [ $? -eq 0 ]; then
-        echo "Docker machine '$MACHINE_NAME' already exists"
-    else
-
-	MACHINE_CREATE_CMD="docker-machine create \
-				--driver amazonec2 \
-				--amazonec2-vpc-id ${AWS_VPC_ID} \
-				--amazonec2-zone $VPC_AVAIL_ZONE \
-				--amazonec2-instance-type ${AWS_DOCKER_MACHINE_SIZE}"
-
-	if [ -n "${AWS_ACCESS_KEY_ID}" ]; then
-	    MACHINE_CREATE_CMD="${MACHINE_CREATE_CMD} \
-				    --amazonec2-access-key $AWS_ACCESS_KEY_ID \
-				    --amazonec2-secret-key $AWS_SECRET_ACCESS_KEY \
-				    --amazonec2-region $AWS_DEFAULT_REGION"
-	fi
-
-	MACHINE_CREATE_CMD="${MACHINE_CREATE_CMD} ${MACHINE_NAME}"
-    ${MACHINE_CREATE_CMD}
-
-    fi
-
+    rc=$?
+    
     # Reenable errexit
     set -e
+    
+    if [ ${rc} -eq 0 ]; then
+        echo "Docker machine '$MACHINE_NAME' already exists"
+    else
+        MACHINE_CREATE_CMD="docker-machine create \
+                    --driver amazonec2 \
+                    --amazonec2-vpc-id ${AWS_VPC_ID} \
+                    --amazonec2-zone $VPC_AVAIL_ZONE \
+                    --amazonec2-instance-type ${AWS_DOCKER_MACHINE_SIZE} \
+                    --amazonec2-root-size ${AWS_ROOT_SIZE:-32}"
 
+        if [ -n "${AWS_ACCESS_KEY_ID}" ] && [ -n "${AWS_SECRET_ACCESS_KEY}" ] && [ -n "${AWS_DEFAULT_REGION}" ]; then
+            MACHINE_CREATE_CMD="${MACHINE_CREATE_CMD} \
+                        --amazonec2-access-key ${AWS_ACCESS_KEY_ID} \
+                        --amazonec2-secret-key ${AWS_SECRET_ACCESS_KEY} \
+                        --amazonec2-region ${AWS_DEFAULT_REGION}"
+        fi
+
+        MACHINE_CREATE_CMD="${MACHINE_CREATE_CMD} ${MACHINE_NAME}"
+        ${MACHINE_CREATE_CMD}
+    fi
 }
 
 while getopts "t:m:a:s:c:z:r:u:p:" opt; do
@@ -228,4 +226,11 @@ case ${MACHINE_TYPE} in
 esac
 
 # Use the ADOP CLI
+eval $(docker-machine env ${MACHINE_NAME})
+
 ./adop compose -m "${MACHINE_NAME}" ${CLI_COMPOSE_OPTS} init
+
+# Generate and export Self-Signed SSL certificate for Docker Registry, applicable only for AWS type
+if [ ${MACHINE_TYPE} == "aws" ]; then
+    ./adop certbot gen-export-certs "registry.$(docker-machine ip ${MACHINE_NAME}).nip.io" registry
+fi
